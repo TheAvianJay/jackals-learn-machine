@@ -16,15 +16,29 @@ class Enrollment(models.Model):
         unique_together = ("classroom", "student")
 
 class Question(models.Model):
-    class Type(models.TextChoices):
-        MULTIPLE_CHOICE = "MC", "Multiple Choice"
-        FILL_BLANK = "FB", "Fill in the Blank"
-        SHORT_ANSWER = "SA", "Short Answer"
+    MCQ = "MCQ"
+    FILL = "FILL"
+    SHORT = "SHORT"
 
-    classroom = models.ForeignKey(ClassRoom, on_delete=models.CASCADE, related_name="questions")
+    QTYPE_CHOICES = [
+        (MCQ, "Multiple Choice"),
+        (FILL, "Fill in the Blank"),
+        (SHORT, "Short Answer"),
+    ]
+
+    classroom = models.ForeignKey("ClassRoom", on_delete=models.CASCADE, related_name="questions")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="created_questions")
-    qtype = models.CharField(max_length=2, choices=Type.choices)
+
+    qtype = models.CharField(max_length=10, choices=QTYPE_CHOICES)
     prompt = models.TextField()
+
+    # For FILL: store acceptable answers (normalized later)
+    answer_key = models.TextField(blank=True, default="")
+
+    # For SHORT: optional teacher notes / rubric (MVP)
+    rubric = models.TextField(blank=True, default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
 
 class Choice(models.Model):
     question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name="choices")
