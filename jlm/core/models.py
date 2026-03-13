@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 class ClassRoom(models.Model):
     name = models.CharField(max_length=120)
@@ -40,7 +41,58 @@ class Question(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
 
+    assignment = models.ForeignKey(
+        "Assignment",
+        on_delete=models.CASCADE,
+        related_name="questions",
+        null=True,
+        blank=True
+    )
+
 class Choice(models.Model):
     question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name="choices")
     text = models.CharField(max_length=255)
     is_correct = models.BooleanField(default=False)
+
+# For MCQ: store choices as related objects. 
+# For FILL/SHORT: ignore this model.
+# Bellow is the submission and submission answer 
+# models, which are used to store student responses
+# to questions. Each submission is linked to a 
+# classroom and a student, and can have multiple 
+# answers (one per question). The response field 
+# in SubmissionAnswer can store either the selected 
+# choice index for MCQs or the text response for 
+# FILL/SHORT questions.
+class Submission(models.Model):
+    classroom = models.ForeignKey(ClassRoom, on_delete=models.CASCADE, related_name="submissions")
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="submissions")
+    assignment = models.ForeignKey(
+        "Assignment",
+        on_delete=models.CASCADE,
+        related_name="submissions",
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+
+    total_score = models.FloatField(default=0)
+    is_graded = models.BooleanField(default=False)
+
+class SubmissionAnswer(models.Model):
+    submission = models.ForeignKey(Submission, on_delete=models.CASCADE, related_name="answers")
+    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name="submission_answers")
+    response = models.TextField(blank=True, default="")
+
+    # NEW:
+    is_correct = models.BooleanField(null=True, blank=True)  # null = not graded yet
+    points = models.FloatField(default=0)
+
+class Assignment(models.Model):
+    classroom = models.ForeignKey(ClassRoom, on_delete=models.CASCADE, related_name="assignments")
+    title = models.CharField(max_length=200)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.title
