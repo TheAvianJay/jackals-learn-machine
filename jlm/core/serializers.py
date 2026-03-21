@@ -13,14 +13,12 @@ class StudentSummarySerializer(serializers.ModelSerializer):
         model = User
         fields = ["id", "username", "first_name", "last_name"]
 
-
 class EnrollmentSerializer(serializers.ModelSerializer):
     student = StudentSummarySerializer(read_only=True)
 
     class Meta:
         model = Enrollment
         fields = ["id", "student"]
-
 
 class ClassRoomSerializer(serializers.ModelSerializer):
     roster = serializers.SerializerMethodField()
@@ -33,7 +31,6 @@ class ClassRoomSerializer(serializers.ModelSerializer):
     def get_roster(self, obj):
         enrollments = obj.enrollments.select_related("student").all()
         return EnrollmentSerializer(enrollments, many=True).data
-
 
 class AddStudentSerializer(serializers.Serializer):
     username = serializers.CharField()
@@ -49,13 +46,17 @@ class AddStudentSerializer(serializers.Serializer):
 
         return value
 
-
 # ---------- Questions ----------
 
 class ChoiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Choice
         fields = ["id", "text", "is_correct"]
+
+class StudentChoiceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Choice
+        fields = ["id", "text"]
 
 
 class QuestionSerializer(serializers.ModelSerializer):
@@ -115,6 +116,19 @@ class QuestionSerializer(serializers.ModelSerializer):
 
         return instance
 
+class StudentQuestionSerializer(serializers.ModelSerializer):
+    choices = StudentChoiceSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Question
+        fields = [
+            "id",
+            "qtype",
+            "prompt",
+            "choices",
+            "created_at",
+        ]
+        
 # ---------- Submissions ----------   
 class SubmissionAnswerSerializer(serializers.ModelSerializer):
     question_id = serializers.IntegerField(source="question.id", read_only=True)
@@ -208,6 +222,5 @@ class SubmitPayloadSerializer(serializers.Serializer):
 class AssignmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Assignment
-        fields = ["id", "classroom", "title", "created_at"]
+        fields = ["id", "classroom", "title", "due_date", "created_at"]
         read_only_fields = ["classroom", "created_at"]
-        
