@@ -1,21 +1,68 @@
 from django.contrib.auth import get_user_model
-from rest_framework import viewsets, permissions, status
+from django.core.exceptions import ValidationError
+from django.db import models
+from rest_framework import viewsets, permissions, status, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from .models import Feedback
+from .serializers import FeedbackSerializer
 
 from .models import ClassRoom, Enrollment, Question, Submission, SubmissionAnswer
 from .serializers import (
     AssignmentSerializer,
-    ClassRoomSerializer,
+    ClassRoomSerializer,   
     AddStudentSerializer,
     QuestionSerializer,
-    StudentQuestionSerializer,
+    StudentQuestionSerializer, 
     SubmissionSerializer,
     SubmitPayloadSerializer,
 )
 from django.utils import timezone
 User = get_user_model()
+
+class FeedbackViewSet(viewsets.ModelViewSet):
+    queryset = Feedback.objects.all()
+    serializer_class = FeedbackSerializer
+
+    def perform_create(self, serializer):
+        # Count pinned feedbacks
+        pinned_count = Feedback.objects.filter(
+            answer=serializer.validated_data["answer"], pinned=True
+        ).count()
+
+        if pinned_count >= 5:
+            raise serializers.ValidationError(
+                "Cannot add new feedback: maximum of 5 pinned feedback already exists."
+            )
+
+        feedback = serializer.save(teacher=self.request.user)
+
+        # Get all feedbacks for this answer (oldest first), excluding pinned
+        qs = Feedback.objects.filter(answer=feedback.answer, pinned=False).order_by("created_at")
+
+        # Delete oldest if more than 5 (non-pinned)
+        excess = qs.count() - (5 - pinned_count)
+        if excess > 0:
+            qs[:excess].delete()
+
+    def perform_update(self, serializer):
+        # Set edited flags on update
+        serializer.save(edited=True, edited_at=timezone.now())
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        submission_id = self.request.query_params.get("submission")
+        answer_id = self.request.query_params.get("answer")
+
+        if submission_id:
+            queryset = queryset.filter(answer__submission_id=submission_id)
+
+        if answer_id:
+            queryset = queryset.filter(answer_id=answer_id)
+
+        return queryset.order_by("-created_at")
 
 class IsTeacher(permissions.BasePermission):
     def has_permission(self, request, view):
@@ -59,6 +106,14 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
         return answers_dict
 
     def _create_submission(self, *, classroom, student, answers_dict, assignment=None):
+
+        from django.utils import timezone
+        from rest_framework.exceptions import ValidationError
+
+        if assignment and assignment.due_date:
+            if timezone.now() > assignment.due_date:
+                raise ValidationError("Assignment is past due and locked.")
+
         delete_filter = {
             "classroom": classroom,
             "student": student,
@@ -66,8 +121,17 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
         if assignment is not None:
             delete_filter["assignment"] = assignment
 
-        Submission.objects.filter(**delete_filter).delete()
+        existing = Submission.objects.filter(
+            classroom=classroom,
+            student=student,
+            assignment=assignment
+        ).first()
 
+        if existing:
+            if assignment.due_date and timezone.now() > assignment.due_date:
+                raise ValidationError("Cannot modify submission after due date.")
+
+            existing.delete()
         sub = Submission.objects.create(
             classroom=classroom,
             student=student,
@@ -100,7 +164,7 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
                     choices = list(q.choices.all())
                     if 0 <= selected < len(choices):
                         ans.is_correct = bool(choices[selected].is_correct)
-                        ans.points = 1 if ans.is_correct else 0
+                        ans.points = q.max_points if ans.is_correct else 0
                     else:
                         ans.is_correct = False
                         ans.points = 0
@@ -113,7 +177,7 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
                 accepted = fill_answers(q.answer_key)
                 given = normalize(resp_str)
                 ans.is_correct = given in accepted
-                ans.points = 1 if ans.is_correct else 0
+                ans.points = q.max_points if ans.is_correct else 0
                 ans.save()
 
             # SHORT stays ungraded
@@ -153,6 +217,17 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
         subs = Submission.objects.filter(classroom=classroom).select_related("student").prefetch_related("answers__question")
         return Response(SubmissionSerializer(subs, many=True).data)
     
+    @action(detail=True, methods=["get"], url_path=r"assignments/(?P<aid>\d+)/submissions")
+    def assignment_submissions(self, request, pk=None, aid=None):
+        classroom = self.get_object()
+
+        subs = Submission.objects.filter(
+            classroom=classroom,
+            assignment_id=aid
+        ).select_related("student")
+
+        return Response(SubmissionSerializer(subs, many=True).data)
+
     @action(detail=True, methods=["patch"], url_path=r"submissions/(?P<sid>\d+)/grade")
     def grade_submission(self, request, pk=None, sid=None):
         classroom = self.get_object()
@@ -380,11 +455,7 @@ class StudentClassRoomViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         # 🔒 LOCK SUBMISSION AFTER DUE DATE
-        if assignment.due_date and assignment.due_date < timezone.now():
-            return Response(
-                {"detail": "This assignment is past due and can no longer be submitted."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        now = timezone.now()
 
         try:
             answers_dict = self._parse_answers(request)

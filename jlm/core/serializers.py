@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
+from .models import Feedback
 
 from .models import Assignment, ClassRoom, Enrollment, Question, Choice, Submission, SubmissionAnswer
 
@@ -7,6 +8,23 @@ User = get_user_model()
 
 print("LOADED core/serializers.py ✅")
 # ---------- Roster / Classes ----------
+
+class FeedbackSerializer(serializers.ModelSerializer):
+    teacher = serializers.CharField(source="teacher.username", read_only=True)
+
+    # This is what the frontend will send
+    answer = serializers.PrimaryKeyRelatedField(
+        queryset=SubmissionAnswer.objects.all(),
+        write_only=True
+    )
+
+    # This is what you return
+    answer_id = serializers.IntegerField(source="answer.id", read_only=True)
+
+    class Meta:
+        model = Feedback
+        fields = ['id', 'answer', 'answer_id', 'teacher', 'comment', 'created_at']
+        read_only_fields = ['teacher', 'created_at']
 
 class StudentSummarySerializer(serializers.ModelSerializer):
     class Meta:
@@ -72,6 +90,7 @@ class QuestionSerializer(serializers.ModelSerializer):
             "prompt",
             "answer_key",
             "rubric",
+            "max_points",
             "choices",
             "created_at",
         ]
@@ -82,6 +101,12 @@ class QuestionSerializer(serializers.ModelSerializer):
         choices = self.initial_data.get("choices", None)
         answer_key = data.get("answer_key", getattr(self.instance, "answer_key", ""))
 
+        max_points = data.get("max_points", getattr(self.instance, "max_points", 1))
+
+        # ✅ Ensure valid points
+        if max_points <= 0:
+            raise serializers.ValidationError("max_points must be greater than 0.")
+
         if qtype == "MCQ":
             if not choices or len(choices) < 2:
                 raise serializers.ValidationError("MCQ requires at least 2 choices.")
@@ -91,9 +116,8 @@ class QuestionSerializer(serializers.ModelSerializer):
         if qtype == "FILL":
             if not (answer_key or "").strip():
                 raise serializers.ValidationError("FILL requires answer_key.")
-
-        return data   # ← THIS LINE FIXES YOUR ERROR
-
+        return data
+    
     def create(self, validated_data):
         choices_data = validated_data.pop("choices", [])
         q = Question.objects.create(**validated_data)
@@ -126,6 +150,7 @@ class StudentQuestionSerializer(serializers.ModelSerializer):
             "qtype",
             "prompt",
             "choices",
+            "max_points",
             "created_at",
         ]
         
@@ -134,9 +159,23 @@ class SubmissionAnswerSerializer(serializers.ModelSerializer):
     question_id = serializers.IntegerField(source="question.id", read_only=True)
     prompt = serializers.CharField(source="question.prompt", read_only=True)
     qtype = serializers.CharField(source="question.qtype", read_only=True)
+    feedback = serializers.SerializerMethodField()
 
     # NEW: for MCQ show choice text instead of "0"
     response_display = serializers.SerializerMethodField()
+
+    def get_feedback(self, obj):
+        qs = Feedback.objects.filter(answer=obj).select_related("teacher")
+
+        return [
+            {
+                "id": f.id,
+                "comment": f.comment,
+                "teacher": f.teacher.username,
+                "created_at": f.created_at,
+            }
+            for f in obj.feedback.all().select_related("teacher")
+        ]
 
     class Meta:
         model = SubmissionAnswer
@@ -149,6 +188,7 @@ class SubmissionAnswerSerializer(serializers.ModelSerializer):
             "response_display",  # human readable
             "is_correct",
             "points",
+            "feedback",
         ]
 
     def get_response_display(self, obj):
@@ -220,7 +260,19 @@ class SubmitPayloadSerializer(serializers.Serializer):
     
 
 class AssignmentSerializer(serializers.ModelSerializer):
+    submission_count = serializers.SerializerMethodField()
+
     class Meta:
         model = Assignment
-        fields = ["id", "classroom", "title", "due_date", "created_at"]
-        read_only_fields = ["classroom", "created_at"]
+        fields = [
+            "id",
+            "classroom",
+            "title",
+            "due_date",
+            "created_at",
+            "submission_count",
+        ]
+        read_only_fields = ["classroom", "created_at", "submission_count"]
+
+    def get_submission_count(self, obj):
+        return obj.submissions.count()  # ✅ FIXED

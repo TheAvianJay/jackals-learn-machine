@@ -49,6 +49,8 @@ class Question(models.Model):
         blank=True
     )
 
+    max_points = models.FloatField(default=1)
+
 class Choice(models.Model):
     question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name="choices")
     text = models.CharField(max_length=255)
@@ -96,3 +98,26 @@ class Assignment(models.Model):
 
     def __str__(self):
         return self.title
+    
+class Feedback(models.Model):
+    answer = models.ForeignKey(
+        SubmissionAnswer,
+        on_delete=models.CASCADE,
+        related_name="feedback"
+    )
+    teacher = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="given_feedback"
+    )
+    comment = models.TextField()
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    # ✅ ADD THESE
+    edited = models.BooleanField(default=False)
+    edited_at = models.DateTimeField(null=True, blank=True)
+    pinned = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f"Feedback by {self.teacher} on Answer {self.answer_id}"
