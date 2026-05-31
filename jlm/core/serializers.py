@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from .models import Feedback
 
-from .models import Assignment, ClassRoom, Enrollment, Question, Choice, Submission, SubmissionAnswer
+from .models import Assignment, ClassRoom, Enrollment, Question, Choice, Submission, SubmissionAnswer, UserPreference, Notification
 
 User = get_user_model()
 
@@ -276,3 +276,30 @@ class AssignmentSerializer(serializers.ModelSerializer):
 
     def get_submission_count(self, obj):
         return obj.submissions.count()  # ✅ FIXED
+    
+class UserPreferenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserPreference
+        fields = [
+            "id",
+            "user",
+            "notify_assignment_posted",
+            "notify_assignment_graded",
+            "push_token",
+            "theme",
+            "notify_feedback_added",
+        ]
+class NotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Notification
+        fields = [
+            "id",
+            "is_read",
+            "notif_type",
+            "title",
+            "body",
+            "classroom",
+            "assignment",
+            "created_at",
+        ]
+        read_only_fields = ["created_at", "id", "title", "body", "notif_type"]

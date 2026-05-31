@@ -121,3 +121,64 @@ class Feedback(models.Model):
 
     def __str__(self):
         return f"Feedback by {self.teacher} on Answer {self.answer_id}"
+    
+class UserPreference(models.Model):
+    THEME_CHOICES = [
+        ("system", "System Default"),
+        ("light", "Light"),
+        ("dark", "Dark"),
+    ]
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="preference"
+    )
+    theme = models.CharField(max_length=10, choices=THEME_CHOICES, default="system")
+
+    # Notification toggles
+    notify_assignment_posted = models.BooleanField(default=True)
+    notify_assignment_graded = models.BooleanField(default=True)
+    notify_feedback_added = models.BooleanField(default=True)
+
+    # Push notification token (set by the mobile app)
+    push_token = models.TextField(blank=True, default="")
+
+    def __str__(self):
+        return f"{self.user.username} preferences"
+
+
+class Notification(models.Model):
+    TYPES = [
+        ("assignment_posted", "Assignment Posted"),
+        ("assignment_graded", "Assignment Graded"),
+        ("feedback_added", "Feedback Added"),
+        ("submission_received", "Submission Received"),
+    ]
+
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="notifications"
+    )
+    notif_type = models.CharField(max_length=30, choices=TYPES)
+    title = models.CharField(max_length=200)
+    body = models.TextField()
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    # Optional links back to the relevant object
+    classroom = models.ForeignKey(
+        ClassRoom, on_delete=models.CASCADE,
+        null=True, blank=True, related_name="notifications"
+    )
+    assignment = models.ForeignKey(
+        Assignment, on_delete=models.CASCADE,
+        null=True, blank=True, related_name="notifications"
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.notif_type} → {self.recipient.username}"

@@ -5,8 +5,8 @@ from rest_framework import viewsets, permissions, status, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import Feedback
-from .serializers import FeedbackSerializer
+from .models import Feedback, UserPreference, Notification
+from .serializers import FeedbackSerializer, UserPreferenceSerializer, NotificationSerializer
 
 from .models import ClassRoom, Enrollment, Question, Submission, SubmissionAnswer
 from .serializers import (
@@ -312,6 +312,60 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
             created_by=request.user,
         )
         return Response(ser.data, status=status.HTTP_201_CREATED)
+    
+    @action(detail=True, methods=["get"], url_path="student-grades")
+    def student_grades(self, request, pk=None):
+        classroom = self.get_object()
+        enrollments = classroom.enrollments.select_related("student").all()
+        assignments = classroom.assignments.prefetch_related("questions").all()
+
+        results = []
+
+        for enrollment in enrollments:
+            student = enrollment.student
+            total_earned = 0
+            total_possible = 0
+            assignment_breakdown = []
+
+            for assignment in assignments:
+                possible = sum(q.max_points for q in assignment.questions.all())
+
+                sub = Submission.objects.filter(
+                    classroom=classroom,
+                    student=student,
+                    assignment=assignment,
+                ).first()
+
+                earned = sub.total_score if sub and sub.is_graded else None
+
+                assignment_breakdown.append({
+                    "assignment_id": assignment.id,
+                    "assignment_title": assignment.title,
+                    "possible_points": possible,
+                    "earned_points": earned,
+                    "submitted": sub is not None,
+                    "graded": sub.is_graded if sub else False,
+                })
+
+                if earned is not None:
+                    total_earned += earned
+                    total_possible += possible
+
+            overall_percent = (
+                round((total_earned / total_possible) * 100, 1)
+                if total_possible > 0 else None
+            )
+
+            results.append({
+                "student_id": student.id,
+                "student_username": student.username,
+                "overall_percent": overall_percent,
+                "total_earned": total_earned,
+                "total_possible": total_possible,
+                "assignments": assignment_breakdown,
+            })
+
+        return Response(results)
 
 # Below is the code for the StudentViewSet which allows students to view their enrolled classrooms and ask questions.
 
@@ -494,3 +548,116 @@ class StudentClassRoomViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": "No submission yet."}, status=status.HTTP_404_NOT_FOUND)
 
         return Response(SubmissionSerializer(sub).data, status=status.HTTP_200_OK)
+    
+    @action(detail=True, methods=["get"], url_path="overall-grade")
+
+    def overall_grade(self, request, pk=None):
+        classroom = self.get_object()
+
+        assignments = classroom.assignments.all()
+        results = []
+        total_earned = 0
+        total_possible = 0
+
+        for assignment in assignments:
+            # Get max possible points for this assignment
+            possible = sum(
+                q.max_points for q in assignment.questions.all()
+            )
+
+            # Get this student's submission if it exists
+            sub = Submission.objects.filter(
+                classroom=classroom,
+                student=request.user,
+                assignment=assignment,
+            ).first()
+
+            earned = sub.total_score if sub and sub.is_graded else None
+            submitted = sub is not None
+            graded = sub.is_graded if sub else False
+
+            results.append({
+                "assignment_id": assignment.id,
+                "assignment_title": assignment.title,
+                "due_date": assignment.due_date,
+                "possible_points": possible,
+                "earned_points": earned,
+                "submitted": submitted,
+                "graded": graded,
+            })
+
+            # Only count graded submissions toward the overall
+            if earned is not None:
+                total_earned += earned
+                total_possible += possible
+
+        overall_percent = (
+            round((total_earned / total_possible) * 100, 1)
+            if total_possible > 0 else None
+        )
+
+        return Response({
+            "classroom_id": classroom.id,
+            "classroom_name": classroom.name,
+            "overall_percent": overall_percent,
+            "total_earned": total_earned,
+            "total_possible": total_possible,
+            "assignments": results,
+        })
+    
+class PreferenceView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        pref, _ = UserPreference.objects.get_or_create(user=request.user)
+        return Response(UserPreferenceSerializer(pref).data)
+
+    def patch(self, request):
+        pref, _ = UserPreference.objects.get_or_create(user=request.user)
+        ser = UserPreferenceSerializer(pref, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(ser.data)
+
+
+class NotificationListView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        notifs = Notification.objects.filter(recipient=request.user)
+        return Response(NotificationSerializer(notifs, many=True).data)
+
+
+class NotificationMarkReadView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        # Mark all as read
+        Notification.objects.filter(
+            recipient=request.user,
+            is_read=False
+        ).update(is_read=True)
+        return Response({"detail": "All notifications marked as read."})
+
+    def patch(self, request, pk=None):
+        # Mark single notification as read
+        notif = Notification.objects.filter(
+            id=pk,
+            recipient=request.user
+        ).first()
+        if not notif:
+            return Response({"detail": "Not found."}, status=404)
+        notif.is_read = True
+        notif.save()
+        return Response(NotificationSerializer(notif).data)
+
+
+class UnreadCountView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        count = Notification.objects.filter(
+            recipient=request.user,
+            is_read=False
+        ).count()
+        return Response({"unread": count})
