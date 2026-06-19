@@ -32,14 +32,11 @@ class Question(models.Model):
 
     qtype = models.CharField(max_length=10, choices=QTYPE_CHOICES)
     prompt = models.TextField()
-
-    # For FILL: store acceptable answers (normalized later)
+    image = models.ImageField(upload_to="question_images/", null=True, blank=True)  # 👈 new
     answer_key = models.TextField(blank=True, default="")
-
-    # For SHORT: optional teacher notes / rubric (MVP)
     rubric = models.TextField(blank=True, default="")
-
     created_at = models.DateTimeField(auto_now_add=True)
+    allow_multiple_correct = models.BooleanField(default=False)  # 👈 new
 
     assignment = models.ForeignKey(
         "Assignment",
@@ -93,11 +90,32 @@ class SubmissionAnswer(models.Model):
 class Assignment(models.Model):
     classroom = models.ForeignKey(ClassRoom, on_delete=models.CASCADE, related_name="assignments")
     title = models.CharField(max_length=200)
+    start_date = models.DateTimeField(null=True, blank=True)   
     due_date = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    randomize_questions = models.BooleanField(default=False)
+    randomize_choices = models.BooleanField(default=False)
+    is_published = models.BooleanField(default=True)
 
     def __str__(self):
         return self.title
+
+
+class Excuse(models.Model):
+    assignment = models.ForeignKey(
+        Assignment, on_delete=models.CASCADE, related_name="excuses"
+    )
+    student = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="excuses"
+    )
+    reason = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("assignment", "student")
+
+    def __str__(self):
+        return f"{self.student.username} excused from {self.assignment.title}"
     
 class Feedback(models.Model):
     answer = models.ForeignKey(

@@ -5,10 +5,13 @@ from rest_framework import viewsets, permissions, status, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import Feedback, UserPreference, Notification
-from .serializers import FeedbackSerializer, UserPreferenceSerializer, NotificationSerializer
+from .models import (
+    Feedback, UserPreference, Notification, Excuse,
+    ClassRoom, Enrollment, Question, Submission, SubmissionAnswer, Assignment,
+)
+from .serializers import FeedbackSerializer, UserPreferenceSerializer, NotificationSerializer, ExcuseSerializer
 
-from .models import ClassRoom, Enrollment, Question, Submission, SubmissionAnswer
+
 from .serializers import (
     AssignmentSerializer,
     ClassRoomSerializer,   
@@ -217,16 +220,49 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
         subs = Submission.objects.filter(classroom=classroom).select_related("student").prefetch_related("answers__question")
         return Response(SubmissionSerializer(subs, many=True).data)
     
-    @action(detail=True, methods=["get"], url_path=r"assignments/(?P<aid>\d+)/submissions")
-    def assignment_submissions(self, request, pk=None, aid=None):
+    @action(detail=True, methods=["get", "post"], url_path=r"assignments/(?P<aid>\d+)/questions")
+    def assignment_questions(self, request, pk=None, aid=None):
         classroom = self.get_object()
+        assignment = classroom.assignments.filter(id=aid).first()
+        if not assignment:
+            return Response({"detail": "Assignment not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        subs = Submission.objects.filter(
+        if request.method == "GET":
+            qs = assignment.questions.all().order_by("created_at")
+            return Response(
+                QuestionSerializer(qs, many=True, context={"request": request}).data
+            )
+
+        # Parse choices from FormData format
+        data = request.data.dict() if hasattr(request.data, 'dict') else dict(request.data)
+
+        # Reconstruct choices list from FormData keys like choices[0]text, choices[0]is_correct
+        choices = {}
+        for key, value in request.data.items():
+            if key.startswith("choices["):
+                import re
+                match = re.match(r"choices\[(\d+)\](\w+)", key)
+                if match:
+                    idx, field = int(match.group(1)), match.group(2)
+                    if idx not in choices:
+                        choices[idx] = {}
+                    if field == "is_correct":
+                        choices[idx][field] = value.lower() == "true"
+                    else:
+                        choices[idx][field] = value
+
+        if choices:
+            data["choices"] = [choices[i] for i in sorted(choices.keys())]
+
+        ser = QuestionSerializer(data=data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        ser.save(
             classroom=classroom,
-            assignment_id=aid
-        ).select_related("student")
-
-        return Response(SubmissionSerializer(subs, many=True).data)
+            assignment=assignment,
+            created_by=request.user,
+            image=request.FILES.get("image"),
+        )
+        return Response(ser.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["patch"], url_path=r"submissions/(?P<sid>\d+)/grade")
     def grade_submission(self, request, pk=None, sid=None):
@@ -301,24 +337,49 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Assignment not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if request.method == "GET":
-            qs = assignment.questions.all().order_by("-created_at")
-            return Response(QuestionSerializer(qs, many=True).data)
+            qs = assignment.questions.all().order_by("created_at")
+            return Response(
+                QuestionSerializer(qs, many=True, context={"request": request}).data
+            )
 
-        ser = QuestionSerializer(data=request.data)
+        # Build mutable data dict from request
+        import json
+        data = {}
+        for key in ["qtype", "prompt", "max_points", "answer_key", "rubric", "allow_multiple_correct"]:
+            if key in request.data:
+                data[key] = request.data[key]
+
+        # Choices come as a JSON string in the "choices" field
+        raw_choices = request.data.get("choices")
+        if raw_choices:
+            try:
+                data["choices"] = json.loads(raw_choices)
+            except (json.JSONDecodeError, TypeError):
+                data["choices"] = raw_choices  # already parsed
+
+        ser = QuestionSerializer(data=data, context={"request": request})
         ser.is_valid(raise_exception=True)
-        ser.save(
+
+        image = request.FILES.get("image")
+        question = ser.save(
             classroom=classroom,
             assignment=assignment,
             created_by=request.user,
         )
-        return Response(ser.data, status=status.HTTP_201_CREATED)
+
+        # Save image separately if provided
+        if image:
+            question.image = image
+            question.save()
+
+        return Response(
+            QuestionSerializer(question, context={"request": request}).data, status=status.HTTP_201_CREATED)
     
     @action(detail=True, methods=["get"], url_path="student-grades")
     def student_grades(self, request, pk=None):
         classroom = self.get_object()
         enrollments = classroom.enrollments.select_related("student").all()
         assignments = classroom.assignments.prefetch_related("questions").all()
-
         results = []
 
         for enrollment in enrollments:
@@ -330,10 +391,12 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
             for assignment in assignments:
                 possible = sum(q.max_points for q in assignment.questions.all())
 
+                is_excused = Excuse.objects.filter(
+                    assignment=assignment, student=student
+                ).first()
+
                 sub = Submission.objects.filter(
-                    classroom=classroom,
-                    student=student,
-                    assignment=assignment,
+                    classroom=classroom, student=student, assignment=assignment,
                 ).first()
 
                 earned = sub.total_score if sub and sub.is_graded else None
@@ -345,9 +408,11 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
                     "earned_points": earned,
                     "submitted": sub is not None,
                     "graded": sub.is_graded if sub else False,
+                    "excused": bool(is_excused),
+                    "excuse_reason": is_excused.reason if is_excused else None,
                 })
 
-                if earned is not None:
+                if earned is not None and not is_excused:
                     total_earned += earned
                     total_possible += possible
 
@@ -366,6 +431,43 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
             })
 
         return Response(results)
+    
+    @action(detail=True, methods=["patch"], url_path=r"assignments/(?P<aid>\d+)/publish")
+    def publish_assignment(self, request, pk=None, aid=None):
+        classroom = self.get_object()
+        assignment = classroom.assignments.filter(id=aid).first()
+
+        if not assignment:
+            return Response({"detail": "Assignment not found."}, status=404)
+
+        assignment.is_published = True
+        assignment.save()
+        return Response(AssignmentSerializer(assignment).data)
+    
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        # Only allow deleting through the normal flow
+        # Published assignments with submissions should not be deletable this way
+        if instance.is_published and instance.submissions.exists():
+            return Response(
+                {"detail": "Cannot delete a published assignment with submissions."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().destroy(request, *args, **kwargs)
+    
+    @action(detail=True, methods=["delete"], url_path=r"assignments/(?P<aid>\d+)/discard")
+    def discard_assignment(self, request, pk=None, aid=None):
+        classroom = self.get_object()
+        assignment = classroom.assignments.filter(id=aid, is_published=False).first()
+
+        if not assignment:
+            return Response(
+                {"detail": "Draft assignment not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        assignment.delete()
+        return Response({"detail": "Draft discarded."}, status=status.HTTP_204_NO_CONTENT)
 
 # Below is the code for the StudentViewSet which allows students to view their enrolled classrooms and ask questions.
 
@@ -444,14 +546,22 @@ class StudentClassRoomViewSet(viewsets.ReadOnlyModelViewSet):
 
             if q.qtype == "MCQ":
                 try:
-                    selected = int(resp_str)
-                    choices = list(q.choices.all())
-                    if 0 <= selected < len(choices):
-                        ans.is_correct = bool(choices[selected].is_correct)
-                        ans.points = 1 if ans.is_correct else 0
+                    if q.allow_multiple_correct:
+                        # resp_str is comma-separated selected indices e.g. "0,2"
+                        selected_indices = set(
+                            int(x.strip()) for x in resp_str.split(",") if x.strip().isdigit()
+                        )
+                        choices = list(q.choices.all())
+                        correct_indices = {i for i, c in enumerate(choices) if c.is_correct}
+                        ans.is_correct = selected_indices == correct_indices
                     else:
-                        ans.is_correct = False
-                        ans.points = 0
+                        selected = int(resp_str)
+                        choices = list(q.choices.all())
+                        if 0 <= selected < len(choices):
+                            ans.is_correct = bool(choices[selected].is_correct)
+                        else:
+                            ans.is_correct = False
+                    ans.points = q.max_points if ans.is_correct else 0
                 except Exception:
                     ans.is_correct = False
                     ans.points = 0
@@ -475,7 +585,9 @@ class StudentClassRoomViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=["get"], url_path="assignments")
     def assignments(self, request, pk=None):
         classroom = self.get_object()
-        qs = classroom.assignments.all().order_by("-created_at")
+        qs = classroom.assignments.filter(
+            is_published=True  # 👈 students only see published
+        ).order_by("-created_at")
         return Response(AssignmentSerializer(qs, many=True).data)
 
     @action(detail=True, methods=["get"], url_path=r"assignments/(?P<aid>\d+)/questions")
@@ -484,19 +596,18 @@ class StudentClassRoomViewSet(viewsets.ReadOnlyModelViewSet):
         assignment = classroom.assignments.filter(id=aid).first()
 
         if not assignment:
-            return Response(
-                {"detail": "Assignment not found."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return Response({"detail": "Assignment not found."}, status=status.HTTP_404_NOT_FOUND)
 
         qs = (
             Question.objects.filter(classroom=classroom, assignment=assignment)
             .prefetch_related("choices")
-            .order_by("-created_at")
+            .order_by("created_at")
         )
 
-        return Response(StudentQuestionSerializer(qs, many=True).data)
-
+        return Response(
+            StudentQuestionSerializer(qs, many=True, context={"request": request}).data
+        )
+    
     @action(detail=True, methods=["post"], url_path=r"assignments/(?P<aid>\d+)/submit")
     def submit_assignment(self, request, pk=None, aid=None):
         classroom = self.get_object()
@@ -550,22 +661,22 @@ class StudentClassRoomViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(SubmissionSerializer(sub).data, status=status.HTTP_200_OK)
     
     @action(detail=True, methods=["get"], url_path="overall-grade")
-
     def overall_grade(self, request, pk=None):
         classroom = self.get_object()
-
         assignments = classroom.assignments.all()
         results = []
         total_earned = 0
         total_possible = 0
 
         for assignment in assignments:
-            # Get max possible points for this assignment
-            possible = sum(
-                q.max_points for q in assignment.questions.all()
-            )
+            possible = sum(q.max_points for q in assignment.questions.all())
 
-            # Get this student's submission if it exists
+            # Check if excused
+            is_excused = Excuse.objects.filter(
+                assignment=assignment,
+                student=request.user,
+            ).first()
+
             sub = Submission.objects.filter(
                 classroom=classroom,
                 student=request.user,
@@ -576,18 +687,23 @@ class StudentClassRoomViewSet(viewsets.ReadOnlyModelViewSet):
             submitted = sub is not None
             graded = sub.is_graded if sub else False
 
+            excuse_reason = is_excused.reason if is_excused else None
+
             results.append({
                 "assignment_id": assignment.id,
                 "assignment_title": assignment.title,
                 "due_date": assignment.due_date,
+                "start_date": assignment.start_date,
                 "possible_points": possible,
                 "earned_points": earned,
                 "submitted": submitted,
                 "graded": graded,
+                "excused": bool(is_excused),
+                "excuse_reason": excuse_reason,
             })
 
-            # Only count graded submissions toward the overall
-            if earned is not None:
+            # Only count non-excused graded submissions
+            if earned is not None and not is_excused:
                 total_earned += earned
                 total_possible += possible
 
@@ -604,7 +720,7 @@ class StudentClassRoomViewSet(viewsets.ReadOnlyModelViewSet):
             "total_possible": total_possible,
             "assignments": results,
         })
-    
+
 class PreferenceView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -661,3 +777,59 @@ class UnreadCountView(APIView):
             is_read=False
         ).count()
         return Response({"unread": count})
+    
+class ExcuseView(APIView):
+    permission_classes = [IsTeacher]
+
+    def get(self, request, classroom_id=None, assignment_id=None):
+        # List all excuses for an assignment
+        excuses = Excuse.objects.filter(
+            assignment_id=assignment_id,
+            assignment__classroom_id=classroom_id,
+            assignment__classroom__teacher=request.user,
+        ).select_related("student")
+        return Response(ExcuseSerializer(excuses, many=True).data)
+
+    def post(self, request, classroom_id=None, assignment_id=None):
+        # Excuse a student
+        student_id = request.data.get("student_id")
+        reason = request.data.get("reason", "")
+
+        if not student_id:
+            return Response({"detail": "student_id required."}, status=400)
+
+        assignment = Assignment.objects.filter(
+            id=assignment_id,
+            classroom_id=classroom_id,
+            classroom__teacher=request.user,
+        ).first()
+
+        if not assignment:
+            return Response({"detail": "Assignment not found."}, status=404)
+
+        excuse, created = Excuse.objects.get_or_create(
+            assignment=assignment,
+            student_id=student_id,
+            defaults={"reason": reason},
+        )
+
+        if not created:
+            # Update reason if already excused
+            excuse.reason = reason
+            excuse.save()
+
+        return Response(ExcuseSerializer(excuse).data, status=201)
+
+    def delete(self, request, classroom_id=None, assignment_id=None, student_id=None):
+        excuse = Excuse.objects.filter(
+            assignment_id=assignment_id,
+            assignment__classroom_id=classroom_id,
+            assignment__classroom__teacher=request.user,
+            student_id=student_id,
+        ).first()
+
+        if not excuse:
+            return Response({"detail": "Excuse not found."}, status=404)
+
+        excuse.delete()
+        return Response({"detail": "Excuse removed."}, status=204)

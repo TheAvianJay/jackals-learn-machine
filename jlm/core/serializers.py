@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from .models import Feedback
 
-from .models import Assignment, ClassRoom, Enrollment, Question, Choice, Submission, SubmissionAnswer, UserPreference, Notification
+from .models import Assignment, ClassRoom, Enrollment, Question, Choice, Submission, SubmissionAnswer, UserPreference, Notification, Excuse
 
 User = get_user_model()
 
@@ -79,6 +79,7 @@ class StudentChoiceSerializer(serializers.ModelSerializer):
 
 class QuestionSerializer(serializers.ModelSerializer):
     choices = ChoiceSerializer(many=True, required=False)
+    image_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
@@ -88,22 +89,31 @@ class QuestionSerializer(serializers.ModelSerializer):
             "created_by",
             "qtype",
             "prompt",
+            "image",
+            "image_url",
             "answer_key",
             "rubric",
             "max_points",
             "choices",
+            "allow_multiple_correct",
             "created_at",
         ]
-        read_only_fields = ["classroom", "created_by", "created_at"]
+        read_only_fields = ["classroom", "created_by", "created_at", "image_url"]
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(obj.image.url)
+        return obj.image.url
 
     def validate(self, data):
         qtype = data.get("qtype", getattr(self.instance, "qtype", None))
         choices = self.initial_data.get("choices", None)
         answer_key = data.get("answer_key", getattr(self.instance, "answer_key", ""))
-
         max_points = data.get("max_points", getattr(self.instance, "max_points", 1))
 
-        # ✅ Ensure valid points
         if max_points <= 0:
             raise serializers.ValidationError("max_points must be greater than 0.")
 
@@ -117,31 +127,29 @@ class QuestionSerializer(serializers.ModelSerializer):
             if not (answer_key or "").strip():
                 raise serializers.ValidationError("FILL requires answer_key.")
         return data
-    
+
     def create(self, validated_data):
         choices_data = validated_data.pop("choices", [])
         q = Question.objects.create(**validated_data)
         for c in choices_data:
             Choice.objects.create(question=q, **c)
         return q
+
     def update(self, instance, validated_data):
         choices_data = validated_data.pop("choices", None)
-
-        # update main fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
-
-        # if choices were provided, replace them (simple MVP approach)
         if choices_data is not None:
             instance.choices.all().delete()
             for c in choices_data:
                 Choice.objects.create(question=instance, **c)
-
         return instance
+
 
 class StudentQuestionSerializer(serializers.ModelSerializer):
     choices = StudentChoiceSerializer(many=True, read_only=True)
+    image_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
@@ -149,10 +157,20 @@ class StudentQuestionSerializer(serializers.ModelSerializer):
             "id",
             "qtype",
             "prompt",
+            "image_url",
             "choices",
             "max_points",
+            "allow_multiple_correct",
             "created_at",
         ]
+
+    def get_image_url(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(obj.image.url)
+        return obj.image.url
         
 # ---------- Submissions ----------   
 class SubmissionAnswerSerializer(serializers.ModelSerializer):
@@ -258,6 +276,13 @@ class SubmitPayloadSerializer(serializers.Serializer):
 
         raise serializers.ValidationError("answers must be an object or a list.")
     
+class ExcuseSerializer(serializers.ModelSerializer):
+    student_username = serializers.CharField(source="student.username", read_only=True)
+
+    class Meta:
+        model = Excuse
+        fields = ["id", "assignment", "student", "student_username", "reason", "created_at"]
+        read_only_fields = ["created_at"]
 
 class AssignmentSerializer(serializers.ModelSerializer):
     submission_count = serializers.SerializerMethodField()
@@ -271,11 +296,15 @@ class AssignmentSerializer(serializers.ModelSerializer):
             "due_date",
             "created_at",
             "submission_count",
+            "randomize_questions",  
+            "randomize_choices",
+            "start_date",
+            "is_published",
         ]
         read_only_fields = ["classroom", "created_at", "submission_count"]
 
     def get_submission_count(self, obj):
-        return obj.submissions.count()  # ✅ FIXED
+        return obj.submissions.count()
     
 class UserPreferenceSerializer(serializers.ModelSerializer):
     class Meta:
