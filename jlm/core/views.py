@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from .models import (
     Feedback, UserPreference, Notification, Excuse,
-    ClassRoom, Enrollment, Question, Submission, SubmissionAnswer, Assignment,
+    ClassRoom, Enrollment, Question, Submission, SubmissionAnswer, Assignment, ProfilePictureFlag
 )
 from .serializers import FeedbackSerializer, UserPreferenceSerializer, NotificationSerializer, ExcuseSerializer
 
@@ -219,50 +219,6 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
         classroom = self.get_object()
         subs = Submission.objects.filter(classroom=classroom).select_related("student").prefetch_related("answers__question")
         return Response(SubmissionSerializer(subs, many=True).data)
-    
-    @action(detail=True, methods=["get", "post"], url_path=r"assignments/(?P<aid>\d+)/questions")
-    def assignment_questions(self, request, pk=None, aid=None):
-        classroom = self.get_object()
-        assignment = classroom.assignments.filter(id=aid).first()
-        if not assignment:
-            return Response({"detail": "Assignment not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        if request.method == "GET":
-            qs = assignment.questions.all().order_by("created_at")
-            return Response(
-                QuestionSerializer(qs, many=True, context={"request": request}).data
-            )
-
-        # Parse choices from FormData format
-        data = request.data.dict() if hasattr(request.data, 'dict') else dict(request.data)
-
-        # Reconstruct choices list from FormData keys like choices[0]text, choices[0]is_correct
-        choices = {}
-        for key, value in request.data.items():
-            if key.startswith("choices["):
-                import re
-                match = re.match(r"choices\[(\d+)\](\w+)", key)
-                if match:
-                    idx, field = int(match.group(1)), match.group(2)
-                    if idx not in choices:
-                        choices[idx] = {}
-                    if field == "is_correct":
-                        choices[idx][field] = value.lower() == "true"
-                    else:
-                        choices[idx][field] = value
-
-        if choices:
-            data["choices"] = [choices[i] for i in sorted(choices.keys())]
-
-        ser = QuestionSerializer(data=data, context={"request": request})
-        ser.is_valid(raise_exception=True)
-        ser.save(
-            classroom=classroom,
-            assignment=assignment,
-            created_by=request.user,
-            image=request.FILES.get("image"),
-        )
-        return Response(ser.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["patch"], url_path=r"submissions/(?P<sid>\d+)/grade")
     def grade_submission(self, request, pk=None, sid=None):
@@ -468,6 +424,33 @@ class ClassRoomViewSet(viewsets.ModelViewSet):
 
         assignment.delete()
         return Response({"detail": "Draft discarded."}, status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["get"], url_path=r"assignments/(?P<aid>\d+)/submissions")
+    def assignment_submissions(self, request, pk=None, aid=None):
+        classroom = self.get_object()
+
+        subs = Submission.objects.filter(
+            classroom=classroom,
+            assignment_id=aid
+        ).select_related("student")
+
+        return Response(SubmissionSerializer(subs, many=True).data)
+    
+    @action(detail=True, methods=["patch"], url_path=r"assignments/(?P<aid>\d+)")
+    def update_assignment(self, request, pk=None, aid=None):
+        classroom = self.get_object()
+        assignment = classroom.assignments.filter(id=aid).first()
+
+        if not assignment:
+            return Response(
+                {"detail": "Assignment not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        ser = AssignmentSerializer(assignment, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(ser.data)
 
 # Below is the code for the StudentViewSet which allows students to view their enrolled classrooms and ask questions.
 
@@ -833,3 +816,70 @@ class ExcuseView(APIView):
 
         excuse.delete()
         return Response({"detail": "Excuse removed."}, status=204)
+    
+#flagging profile pictures
+#As much as I would like to trust people to take this seriously,
+#there are people who like to be rebels so I have to implement a 
+# flagging system for profile pictures because we can't trust everyone to be responsible with their profile pictures.
+
+class FlagProfilePictureView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, user_id=None):
+        if request.user.id == user_id:
+            return Response({"detail": "Cannot flag your own picture."}, status=400)
+
+        target = User.objects.filter(id=user_id).first()
+        if not target:
+            return Response({"detail": "User not found."}, status=404)
+
+        ProfilePictureFlag.objects.get_or_create(
+            flagged_user=target,
+            flagged_by=request.user,
+            defaults={"reason": request.data.get("reason", "")}
+        )
+        return Response({"detail": "Flagged successfully."})
+    
+class FlaggedProfilesView(APIView):
+    permission_classes = [IsTeacher]
+
+    def get(self, request):
+        flags = ProfilePictureFlag.objects.filter(
+            resolved=False
+        ).select_related("flagged_user", "flagged_by")
+
+        return Response([{
+            "flag_id": f.id,
+            "user_id": f.flagged_user.id,
+            "username": f.flagged_user.username,
+            "profile_picture_url": request.build_absolute_uri(
+                f.flagged_user.profile_picture.url
+            ) if f.flagged_user.profile_picture else None,
+            "flagged_by": f.flagged_by.username,
+            "reason": f.reason,
+            "created_at": f.created_at,
+        } for f in flags])
+
+
+class ResolveFlagView(APIView):
+    permission_classes = [IsTeacher]
+
+    def post(self, request, user_id=None):
+        action = request.data.get("action")  # "approve" or "revoke"
+
+        target = User.objects.filter(id=user_id).first()
+        if not target:
+            return Response({"detail": "User not found."}, status=404)
+
+        if action == "revoke":
+            target.profile_picture.delete(save=False)
+            target.profile_picture = None
+            target.profile_picture_approved = False
+            target.save()
+
+        elif action == "approve":
+            target.profile_picture_approved = True
+            target.save()
+
+        ProfilePictureFlag.objects.filter(flagged_user=target).update(resolved=True)
+        return Response({"detail": f"Picture {action}d."})

@@ -200,3 +200,24 @@ class Notification(models.Model):
 
     def __str__(self):
         return f"{self.notif_type} → {self.recipient.username}"
+    
+#Profile picture flagging system
+#Because students can be stupid and upload inappropriate profile pictures, we need a way for teachers to flag them. 
+# This model will store the flags, who flagged them, and the reason. Teachers can then review the flags and take action if necessary.
+class ProfilePictureFlag(models.Model):
+    flagged_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="flags_received",
+    )
+    flagged_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="flags_given",
+    )
+    reason = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved = models.BooleanField(default=False)
+
+    class Meta:
+        unique_together = ("flagged_user", "flagged_by")

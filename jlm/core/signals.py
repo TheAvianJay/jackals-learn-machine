@@ -24,18 +24,27 @@ def on_assignment_posted(sender, instance, created, **kwargs):
     if not created:
         return
 
-    # Notify all enrolled students
+    from django.utils import timezone
+    now = timezone.now()
+
+    # If assignment has a future start date, schedule notification differently
+    # For now only notify if available immediately
+    if instance.start_date and instance.start_date > now:
+        # Assignment is not yet available — notify when it becomes available
+        # For now skip the notification entirely
+        return
+
     enrollments = instance.classroom.enrollments.select_related("student").all()
     for enrollment in enrollments:
         student = enrollment.student
-        pref = get_or_create_pref(student)
+        pref, _ = UserPreference.objects.get_or_create(user=student)
         if not pref.notify_assignment_posted:
             continue
         create_notification(
             recipient=student,
             notif_type="assignment_posted",
-            title="New Assignment Posted",
-            body=f'"{instance.title}" has been posted in {instance.classroom.name}.',
+            title="New Assignment Available",
+            body=f'"{instance.title}" is now available in {instance.classroom.name}.',
             classroom=instance.classroom,
             assignment=instance,
         )

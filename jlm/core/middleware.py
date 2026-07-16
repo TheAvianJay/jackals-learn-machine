@@ -11,7 +11,6 @@ class AppSecretMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        # Exempt auth endpoints and all media files
         if request.path in EXEMPT_PATHS or request.path.startswith("/media/"):
             return self.get_response(request)
 

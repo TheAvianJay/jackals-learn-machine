@@ -7,3 +7,10 @@ class User(AbstractUser):
         STUDENT = "STUDENT", "Student"
 
     role = models.CharField(max_length=20, choices=Role.choices)
+    email = models.EmailField(blank=True, default="")
+    profile_picture = models.ImageField(
+        upload_to="profile_pictures/",
+        null=True,
+        blank=True,
+    )
+    profile_picture_approved = models.BooleanField(default=True)
